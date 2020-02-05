@@ -68,7 +68,7 @@ def get_raw_data(star, miss):
     lc = files.PDCSAP_FLUX.stitch()
     lc = lc.remove_outliers().remove_nans()
     pg = lc.to_periodogram(method='lombscargle', normalization='psd')
-    pg_nu_guess = lc.to_periodogram(method='lombscargle', normalization='psd',minimum_frequency = 1, maximum_frequency = 300)
+    pg_nu_guess = lc.to_periodogram(method='lombscargle', normalization='psd',minimum_frequency = 20, maximum_frequency = 300)
 
     pg_smooth_2 = pg_nu_guess.smooth(method='boxkernel', filter_width=10)
 
@@ -126,45 +126,50 @@ def estimate_A(f, p):
 def estimate_B(f, p):
     return 0, 2, 4
 
-def estimate_sigma():
-	return 1.5*0.267*30**0.768
+def estimate_sigma(numax):
+	return 1.5*0.267*numax**0.768
 
-def prepare_guess(f, p, f_guess, p_guess):
+def vmax_guess(f,p, one_value):
+    num = one_value
+
+    cvs = np.zeros(num)
+    nus = np.zeros(num)
+    entries = len(f)/num
+    entries = np.int_(entries)
+    for i in range(num):
+        mean_nu = np.mean(f[i*entries:(i+1)*entries])
+        nus[i] = mean_nu
+        values = p[i*entries: (i+1)*entries]
+        curr_mean = np.mean(values)
+        curr_std = np.std(values)
+        curr_cv = curr_std/curr_mean
+        cvs[i] = curr_cv
+    highest = [x[0] for x in sorted(enumerate(cvs),key = lambda x: x[1])[-5 :]]
+    vmax_guess = np.mean(nus[highest])
+
+    return vmax_guess
+
+
+def estimate_amp(f, p, numax):
+    idx = np.where((numax - 0.1*numax < f) & (f < numax + 0.1*numax))
+    amp = 1.5*np.mean(p[idx])
+    return amp
+
+
+def prepare_guess(f, p, f_guess, p_guess, n):
 
     W = estimate_w(f, p)
     A, w1, w2, w3 = estimate_A(f, p)
     p1, p2, p3 = estimate_B(f, p)
-    numax = vmax_guess(f_guess,p_guess)
-    sigma = estimate_sigma()
-    
+    numax = vmax_guess(f_guess, p_guess, n)
+    sigma = estimate_sigma(numax)
+    amp = estimate_amp(f_guess, p_guess, numax)
 
-    return W, A, w2, w3, p2, p3, numax, sigma
-
-
-
-def vmax_guess(f,p):
-	num = 45
-	cvs = np.zeros(num)
-	nus = np.zeros(num)
-	entries = len(f)/num
-	entries = np.int_(entries)
-	print(f,p,entries)
-	for i in range(num):
-	    print(i)
-	    mean_nu = np.mean(f[i*entries:(i+1)*entries])
-	    nus[i] = mean_nu
-	    values = p[i*entries: (i+1)*entries]
-	    curr_mean = np.mean(values)
-	    curr_std = np.std(values)
-	    curr_cv = curr_std/curr_mean
-	    cvs[i] = curr_cv
-
-	highest = [x[0] for x in sorted(enumerate(cvs),key = lambda x: x[1])[-1 :]]
-	vmax_guess = np.mean(nus[highest])
-	return vmax_guess
+    return W, A, w2, w3, p2, p3, numax, amp, sigma
 
 
-star = "HD203949"
+
+star = "TIC111750740"
 
 pg1, f1, p1, f2, p2 = get_raw_data(star, "tess")
 
@@ -174,22 +179,19 @@ p_s1 = pg_smooth1.power.value*10**12
 plot_periodogram(f1, p1, p_s1, star)
 
 
-W, A, w2, w3, p2, p3, numax, sigma = prepare_guess(f1, p_s1, f2, p2)
-print(numax)
-print(W, A, w2, w3, p2, p3, 230, 100, 100, 0.2)
-bnds = ((2, 30), (A-0.2*A, A+0.2*A), (0.1, 0.67), (0.01, 0.5), (1e-6, 5), (3, 10), (1, 300), (1000, 4000), (sigma -0.2*sigma, sigma + 0.2*sigma), (5e-10, 0.5))
-initial = np.array([W, A, w2, w3, p2, p3, numax, 1000, sigma, 0.2])
-results_opt = opt(f1, p_s1, initial, bnds)
-print(results_opt)
-plot_solution(f1, p1, results_opt, 'opt_' + star)
+scores = []
+nums = (25, 50, 75, 100, 125,  150, 175, 200)
+for i in nums:
+
+    W, A, w2, w3, ps2, ps3, numax, amp, sigma = prepare_guess(f1, p_s1, f2, p2, i)
+
+    bnds = ((2, 30), (A-0.2*A, A+0.2*A), (0.1, 0.67), (0.01, 0.5), (1e-6, 5), (3, 10), (1, 300), (1000, 4000), (sigma -0.2*sigma, sigma + 0.2*sigma), (5e-10, 0.5))
+    initial = np.array([W, A, w2, w3, ps2, ps3, numax, amp, sigma, 0.2])
+    results_opt = opt(f1, p_s1, initial, bnds)
+    plot_solution(f1, p1, results_opt, 'opt_' + star+ '_' + str(i))
 
 
-
-print(results_opt[6],results_opt[8])
-
-
-
-y_prime = model(initial, f1)
-sigma2 = y_prime**2 * np.exp(2*0.2)
-ll = -0.5*np.sum(((p1 - y_prime)**2 / sigma2) + np.log(sigma2))
-#print(ll)
+    y_prime = model(results_opt, f1)
+    sigma2 = y_prime**2 * np.exp(2*results_opt[9])
+    ll = -0.5*np.sum(((p1 - y_prime)**2 / sigma2) + np.log(sigma2))
+    scores.append([i,ll])
